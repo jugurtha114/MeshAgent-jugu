@@ -1477,7 +1477,16 @@ void* kvm_relay_restart(int paused, void *processPipeMgr, ILibKVM_WriteHandler w
 #endif
 
 		if (SLAVELOG != 0) { logFile = fopen("/tmp/slave", "w"); }
-		if (uid != 0) { ignore_result(setuid(uid)); }
+		if (uid != 0)
+		{
+			ignore_result(setuid(uid));
+			/* libpulse/PipeWire look up the socket via XDG_RUNTIME_DIR.
+			 * When the parent ran as root its XDG_RUNTIME_DIR is wrong for
+			 * the desktop user; set it explicitly after dropping privileges. */
+			char xdg_path[32];
+			snprintf(xdg_path, sizeof(xdg_path), "/run/user/%d", (int)uid);
+			setenv("XDG_RUNTIME_DIR", xdg_path, 1);
+		}
 
 		if (g_ILibCrashDump_path != NULL)
 		{

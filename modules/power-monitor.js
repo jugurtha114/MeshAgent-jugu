@@ -59,35 +59,49 @@ function powerMonitor()
         var devices = require('fs').readdirSync('/sys/class/power_supply');
         for (var i in devices)
         {
-            if (require('fs').readFileSync('/sys/class/power_supply/' + devices[i] + '/type').toString().trim() == 'Mains')
+            try
             {
-                this._ACPath = '/sys/class/power_supply/' + devices[i] + '/';
-                break;
-            }
+                if (require('fs').readFileSync('/sys/class/power_supply/' + devices[i] + '/type').toString().trim() == 'Mains')
+                {
+                    this._ACPath = '/sys/class/power_supply/' + devices[i] + '/';
+                    break;
+                }
+            } catch(e) {}
         }
         for (var i in devices)
         {
-            if (require('fs').readFileSync('/sys/class/power_supply/' + devices[i] + '/type').toString().trim() == 'Battery')
+            try
             {
-                this._BatteryPath.push('/sys/class/power_supply/' + devices[i] + '/');
-            }
+                if (require('fs').readFileSync('/sys/class/power_supply/' + devices[i] + '/type').toString().trim() == 'Battery')
+                {
+                    // Verify capacity file is readable — HID++ and some USB devices expose
+                    // type=Battery but no numeric capacity (they use capacity_level instead).
+                    require('fs').readFileSync('/sys/class/power_supply/' + devices[i] + '/capacity');
+                    this._BatteryPath.push('/sys/class/power_supply/' + devices[i] + '/');
+                }
+            } catch(e) {}
         }
         if (this._ACPath != null)
         {
-            this._ACState = parseInt(require('fs').readFileSync(this._ACPath + 'online').toString().trim());
+            try { this._ACState = parseInt(require('fs').readFileSync(this._ACPath + 'online').toString().trim()); } catch(e) {}
         }
         if (this._BatteryPath.length > 0)
         {
             this._getBatteryLevel = function _getBatteryLevel()
             {
                 var sum = 0;
+                var count = 0;
                 var i;
                 for (i in this._BatteryPath)
                 {
-                    sum += parseInt(require('fs').readFileSync(this._BatteryPath[i] + 'capacity').toString().trim());
+                    try
+                    {
+                        sum += parseInt(require('fs').readFileSync(this._BatteryPath[i] + 'capacity').toString().trim());
+                        count++;
+                    } catch(e) {}
                 }
-                sum = Math.floor(sum / this._BatteryPath.length);
-                return (sum);
+                if (count == 0) { return (this._BatteryLevel >= 0 ? this._BatteryLevel : 0); }
+                return (Math.floor(sum / count));
             }
             this._BatteryLevel = this._getBatteryLevel();
 

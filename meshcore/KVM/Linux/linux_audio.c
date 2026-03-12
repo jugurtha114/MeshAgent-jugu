@@ -111,12 +111,12 @@ static void *audio_capture_thread(void *arg)
     /* Try to load libpulse-simple */
     pa_lib = dlopen("libpulse-simple.so.0", RTLD_LAZY);
     if (!pa_lib) pa_lib = dlopen("libpulse-simple.so", RTLD_LAZY);
-    if (!pa_lib) goto done;
+    if (!pa_lib) { fprintf(stderr, "MeshAudio: dlopen libpulse-simple failed: %s\n", dlerror()); goto done; }
 
     pa_simple_new_t  fn_new  = (pa_simple_new_t) dlsym(pa_lib, "pa_simple_new");
     pa_simple_read_t fn_read = (pa_simple_read_t)dlsym(pa_lib, "pa_simple_read");
     pa_simple_free_t fn_free = (pa_simple_free_t)dlsym(pa_lib, "pa_simple_free");
-    if (!fn_new || !fn_read || !fn_free) goto done;
+    if (!fn_new || !fn_read || !fn_free) { fprintf(stderr, "MeshAudio: dlsym pa_simple symbols failed\n"); goto done; }
 
     pa_sample_spec ss = { PA_SAMPLE_S16LE, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS };
 
@@ -132,7 +132,8 @@ static void *audio_capture_thread(void *arg)
                    NULL, "KVM Audio",
                    &ss, NULL, NULL, &err);
     }
-    if (!s) goto done;
+    if (!s) { fprintf(stderr, "MeshAudio: pa_simple_new failed (both sources), XDG_RUNTIME_DIR=%s\n", getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(unset)"); goto done; }
+    fprintf(stderr, "MeshAudio: pa_simple connected OK, starting capture loop\n");
 
     while (!g_audio_shutdown)
     {
