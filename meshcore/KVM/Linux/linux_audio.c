@@ -108,10 +108,18 @@ static void *audio_capture_thread(void *arg)
 
     pa_sample_spec ss = { PA_SAMPLE_S16LE, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS };
 
-    /* NULL source = default monitor (loopback of system audio output) */
+    /* Try "@DEFAULT_MONITOR@" first (PipeWire / modern PulseAudio).
+     * This captures system audio output (loopback monitor), not the microphone.
+     * Fall back to NULL (legacy PulseAudio default input) if unavailable. */
     s = fn_new(NULL, "MeshAgent", PA_STREAM_RECORD,
-               NULL /* default monitor */, "KVM Audio",
+               "@DEFAULT_MONITOR@", "KVM Audio",
                &ss, NULL, NULL, &err);
+    if (!s) {
+        err = 0;
+        s = fn_new(NULL, "MeshAgent", PA_STREAM_RECORD,
+                   NULL, "KVM Audio",
+                   &ss, NULL, NULL, &err);
+    }
     if (!s) goto done;
 
     while (!g_audio_shutdown)
@@ -181,8 +189,15 @@ void kvm_audio_stop(void)
         pthread_join(g_audio_thread, NULL);
         g_audio_thread = (pthread_t)0;
     }
-    if (g_enc) { opus_encoder_destroy(g_enc); g_enc = NULL; }
+    /* Do NOT destroy g_enc here — it must survive for audio toggle re-enable.
+     * Final destruction is done in kvm_audio_cleanup() called from kvm_cleanup(). */
     g_seq = 0;
+}
+
+void kvm_audio_cleanup(void)
+{
+    kvm_audio_stop();
+    if (g_enc) { opus_encoder_destroy(g_enc); g_enc = NULL; }
 }
 
 #endif /* _KVM_AUDIO */

@@ -41,9 +41,16 @@ void kvm_audio_start(void);
 
 /*
  * kvm_audio_stop  - signals the capture thread to exit and waits for it;
- *                   called on MNG_AUDIO_STOP (cmd 93) and from kvm_cleanup().
+ *                   called on MNG_AUDIO_STOP (cmd 93) and on audio toggle.
+ *                   Does NOT destroy the encoder so audio can be re-enabled.
  */
 void kvm_audio_stop(void);
+
+/*
+ * kvm_audio_cleanup - stops capture thread AND destroys the encoder; call
+ *                     exactly once from kvm_cleanup() to release all resources.
+ */
+void kvm_audio_cleanup(void);
 
 #endif /* _KVM_AUDIO */
 

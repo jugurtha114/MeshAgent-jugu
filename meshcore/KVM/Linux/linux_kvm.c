@@ -1540,7 +1540,7 @@ void kvm_cleanup()
 	int code;
 	g_shutdown = 1;
 #if defined(_KVM_AUDIO)
-	kvm_audio_stop();
+	kvm_audio_cleanup();
 #endif
 
 	if (master2slave[1] != 0 && g_slavekvm != 0) 
