@@ -43,6 +43,7 @@ static void *g_reserved = NULL;
 static volatile int g_audio_shutdown = 1;
 static pthread_t g_audio_thread = (pthread_t)0;
 static uint16_t g_seq = 0;
+static int g_slave_pipe_fd = -1;   /* slave2master[1] registered after fork */
 
 /* -----------------------------------------------------------------------
  * PulseAudio simple API (loaded at runtime via dlopen)
@@ -80,8 +81,19 @@ static void audio_send_frame(const unsigned char *opus_data, int opus_len)
     buf[6] = 0x00; /* flags: not DTX/silence */
     memcpy(buf + 7, opus_data, opus_len);
 
-    if (g_writeHandler) { g_writeHandler(buf, total, g_reserved); }
+    if (g_slave_pipe_fd >= 0) {
+        write(g_slave_pipe_fd, buf, total);
+        fsync(g_slave_pipe_fd);
+    } else if (g_writeHandler) {
+        /* fallback: parent-mode (before fork) or non-Linux platforms */
+        g_writeHandler(buf, total, g_reserved);
+    }
     free(buf);
+}
+
+void kvm_audio_set_slave_fd(int fd)
+{
+    g_slave_pipe_fd = fd;
 }
 
 /* -----------------------------------------------------------------------

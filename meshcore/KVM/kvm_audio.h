@@ -40,6 +40,16 @@ void kvm_audio_init(ILibTransport_DoneState(*writeHandler)(char*, int, void*), v
 void kvm_audio_start(void);
 
 /*
+ * kvm_audio_set_slave_fd - register the slave2master write fd so the audio
+ *   capture thread can push frames through the pipe to the parent.
+ *   Call this in the slave process immediately after fork(), before the
+ *   main loop starts.  Linux-only (Windows/macOS don't use fork).
+ */
+#ifdef __linux__
+void kvm_audio_set_slave_fd(int fd);
+#endif
+
+/*
  * kvm_audio_stop  - signals the capture thread to exit and waits for it;
  *                   called on MNG_AUDIO_STOP (cmd 93) and on audio toggle.
  *                   Does NOT destroy the encoder so audio can be re-enabled.

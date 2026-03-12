@@ -1472,6 +1472,9 @@ void* kvm_relay_restart(int paused, void *processPipeMgr, ILibKVM_WriteHandler w
 	{
 		close(slave2master[0]);
 		close(master2slave[1]);
+#if defined(_KVM_AUDIO)
+		kvm_audio_set_slave_fd(slave2master[1]);   /* register pipe for audio frames */
+#endif
 
 		if (SLAVELOG != 0) { logFile = fopen("/tmp/slave", "w"); }
 		if (uid != 0) { ignore_result(setuid(uid)); }
