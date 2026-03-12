@@ -29,6 +29,9 @@ limitations under the License.
 #include "microstack/ILibAsyncSocket.h"
 #include "microstack/ILibProcessPipe.h"
 #include "microstack/ILibRemoteLogging.h"
+#if defined(_KVM_AUDIO)
+#include "meshcore/KVM/kvm_audio.h"
+#endif
 #include <sas.h>
 
 #if defined(WIN32) && !defined(_WIN32_WCE) && !defined(_MINCORE)
@@ -715,6 +718,14 @@ int kvm_server_inputdata(char *block, int blocklen, ILibKVM_WriteHandler writeHa
 			SCREEN_SEL_TARGET = x;
 		break;
 	}
+#if defined(_KVM_AUDIO)
+	case MNG_AUDIO_START:
+		kvm_audio_start();
+		break;
+	case MNG_AUDIO_STOP:
+		kvm_audio_stop();
+		break;
+#endif
 	}
 	return size;
 }
@@ -1400,6 +1411,9 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 // Setup the KVM session. Return 1 if ok, 0 if it could not be setup.
 int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid)
 {
+#if defined(_KVM_AUDIO)
+	kvm_audio_init(writeHandler, reserved);
+#endif
 	if (processPipeMgr != NULL)
 	{
 #ifdef _WINSERVICE
@@ -1457,6 +1471,9 @@ void kvm_cleanup()
 	// ILIBMESSAGE("KVMBREAK-CLEAN\r\n");
 	KVMDEBUG("kvm_cleanup", 0);
 	g_shutdown = 1;
+#if defined(_KVM_AUDIO)
+	kvm_audio_stop();
+#endif
 	if (gChildProcess != NULL)
 	{
 		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: Attempting to kill child process");

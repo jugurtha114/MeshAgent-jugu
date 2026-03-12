@@ -16,6 +16,9 @@ limitations under the License.
 
 #include "mac_kvm.h"
 #include "../../meshdefines.h"
+#if defined(_KVM_AUDIO)
+#include "meshcore/KVM/kvm_audio.h"
+#endif
 #include "../../meshinfo.h"
 #include "../../../microstack/ILibParsers.h"
 #include "../../../microstack/ILibAsyncSocket.h"
@@ -395,6 +398,14 @@ int kvm_server_inputdata(char* block, int blocklen)
 			//if (fr > 20 && fr < 2000) FRAME_RATE_TIMER = fr;
 			break;
 		}
+#if defined(_KVM_AUDIO)
+		case MNG_AUDIO_START:
+			kvm_audio_start();
+			break;
+		case MNG_AUDIO_STOP:
+			kvm_audio_stop();
+			break;
+#endif
 	}
 
 	return size;
@@ -844,6 +855,9 @@ void kvm_relay_StdErrHandler(ILibProcessPipe_Process sender, char *buffer, size_
 // Setup the KVM session. Return 1 if ok, 0 if it could not be setup.
 void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int uid)
 {
+#if defined(_KVM_AUDIO)
+	kvm_audio_init(writeHandler, reserved);
+#endif
 	char * parms0[] = { "meshagent_osx64", "-kvm0", NULL };
 	void **user = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
 	user[0] = writeHandler;
@@ -900,6 +914,9 @@ void kvm_cleanup()
 {
 	KvmDebugLog("kvm_cleanup\n");
 	g_shutdown = 1;
+#if defined(_KVM_AUDIO)
+	kvm_audio_stop();
+#endif
 	if (gChildProcess != NULL)
 	{
 		ILibProcessPipe_Process_SoftKill(gChildProcess);

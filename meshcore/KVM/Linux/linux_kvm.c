@@ -37,6 +37,9 @@ limitations under the License.
 
 #include "linux_events.h"
 #include "linux_compression.h"
+#if defined(_KVM_AUDIO)
+#include "meshcore/KVM/kvm_audio.h"
+#endif
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -773,6 +776,14 @@ int kvm_server_inputdata(char* block, int blocklen)
 			change_display = 1;
 			break;
 		}
+#if defined(_KVM_AUDIO)
+	case MNG_AUDIO_START:
+		kvm_audio_start();
+		break;
+	case MNG_AUDIO_STOP:
+		kvm_audio_stop();
+		break;
+#endif
 	}
 	return size;
 }
@@ -1508,6 +1519,9 @@ void* kvm_relay_setup(void *processPipeMgr, ILibKVM_WriteHandler writeHandler, v
 {
 	if (kvmthread != (pthread_t)NULL || g_slavekvm != 0) return 0;
 	g_restartcount = 0;
+#if defined(_KVM_AUDIO)
+	kvm_audio_init(writeHandler, reserved);
+#endif
 	return kvm_relay_restart(1, processPipeMgr, writeHandler, reserved, uid, authToken, dispid);
 }
 
@@ -1525,6 +1539,9 @@ void kvm_cleanup()
 {
 	int code;
 	g_shutdown = 1;
+#if defined(_KVM_AUDIO)
+	kvm_audio_stop();
+#endif
 
 	if (master2slave[1] != 0 && g_slavekvm != 0) 
 	{ 
