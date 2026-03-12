@@ -52,6 +52,13 @@ void kvm_audio_stop(void);
  */
 void kvm_audio_cleanup(void);
 
+/*
+ * kvm_audio_resend_caps - re-send MNG_AUDIO_CAPS using the provided handler.
+ *   Called from the parent process when the browser sends MNG_AUDIO_QUERY (94).
+ *   Does NOT create an encoder or touch global state — safe to call from parent.
+ */
+void kvm_audio_resend_caps(ILibTransport_DoneState(*writeHandler)(char*, int, void*), void *reserved);
+
 #endif /* _KVM_AUDIO */
 
 #endif /* KVM_AUDIO_H */

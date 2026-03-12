@@ -61,6 +61,10 @@ int gRemoteMouseRenderDefault = 0;
 	#ifdef _POSIX
 		#ifndef __APPLE__
 			#include "KVM/Linux/linux_kvm.h"
+			#if defined(_KVM_AUDIO)
+				#include "KVM/kvm_audio.h"
+				#include <arpa/inet.h>
+			#endif
 		#else
 			#include "KVM/MacOS/mac_kvm.h"
 		#endif
@@ -935,6 +939,14 @@ ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_WriteSink(ILibDuktap
 	else
 #endif
 	{
+#if defined(_KVM_AUDIO)
+		/* Intercept MNG_AUDIO_QUERY (94): re-send CAPS now that the relay is live */
+		if (bufferLen >= 4 && ntohs(((unsigned short*)buffer)[0]) == MNG_AUDIO_QUERY)
+		{
+			kvm_audio_resend_caps(ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, user);
+			return ILibTransport_DoneState_COMPLETE;
+		}
+#endif
 		kvm_relay_feeddata(buffer, bufferLen);
 	}
 #endif

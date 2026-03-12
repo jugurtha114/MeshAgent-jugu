@@ -172,6 +172,20 @@ void kvm_audio_init(ILibTransport_DoneState(*writeHandler)(char*, int, void*), v
     if (g_writeHandler) { g_writeHandler(caps, 9, g_reserved); }
 }
 
+void kvm_audio_resend_caps(ILibTransport_DoneState(*writeHandler)(char*, int, void*), void *reserved)
+{
+    if (!writeHandler) return;
+    char caps[9];
+    ((unsigned short*)caps)[0] = htons((unsigned short)MNG_AUDIO_CAPS);
+    ((unsigned short*)caps)[1] = htons((unsigned short)9);
+    caps[4] = 0;    /* sample_rate: 0 = 48 kHz */
+    caps[5] = (char)AUDIO_CHANNELS;
+    caps[6] = 28;   /* bitrate kbps */
+    caps[7] = 0x07; /* DTX | FEC | capture_available */
+    caps[8] = 1;    /* platform: Linux */
+    writeHandler(caps, 9, reserved);
+}
+
 void kvm_audio_start(void)
 {
     if (g_audio_shutdown == 0) return; /* already running */

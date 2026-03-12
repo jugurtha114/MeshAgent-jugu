@@ -69,7 +69,8 @@ typedef enum RemoteManagementCommands
 	MNG_AUDIO_DATA  = 90,  // Agent → Browser: Opus-encoded audio chunk
 	MNG_AUDIO_CAPS  = 91,  // Agent → Browser: Capability advertisement (sent at session start)
 	MNG_AUDIO_START = 92,  // Browser → Agent: Start audio capture
-	MNG_AUDIO_STOP  = 93   // Browser → Agent: Stop audio capture
+	MNG_AUDIO_STOP  = 93,  // Browser → Agent: Stop audio capture
+	MNG_AUDIO_QUERY = 94   // Browser → Agent: Request CAPS re-send (pull handshake)
 }RemoteManagementCommands;
 
 
