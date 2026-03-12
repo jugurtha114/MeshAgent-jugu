@@ -126,6 +126,7 @@ static void *audio_capture_thread(void *arg)
     s = fn_new(NULL, "MeshAgent", PA_STREAM_RECORD,
                "@DEFAULT_MONITOR@", "KVM Audio",
                &ss, NULL, NULL, &err);
+    int using_monitor = (s != NULL);
     if (!s) {
         err = 0;
         s = fn_new(NULL, "MeshAgent", PA_STREAM_RECORD,
@@ -133,16 +134,29 @@ static void *audio_capture_thread(void *arg)
                    &ss, NULL, NULL, &err);
     }
     if (!s) { fprintf(stderr, "MeshAudio: pa_simple_new failed (both sources), XDG_RUNTIME_DIR=%s\n", getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(unset)"); goto done; }
-    fprintf(stderr, "MeshAudio: pa_simple connected OK, starting capture loop\n");
+    fprintf(stderr, "MeshAudio: pa_simple connected OK source=%s XDG_RUNTIME_DIR=%s\n",
+            using_monitor ? "@DEFAULT_MONITOR@" : "default-input",
+            getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(unset)");
 
+    int frame_count = 0;
     while (!g_audio_shutdown)
     {
-        if (fn_read(s, pcm_buf, sizeof(pcm_buf), &err) < 0) break;
+        if (fn_read(s, pcm_buf, sizeof(pcm_buf), &err) < 0)
+        {
+            fprintf(stderr, "MeshAudio: pa_simple_read FAILED err=%d after %d frames\n", err, frame_count);
+            break;
+        }
 
         int bytes = opus_encode(g_enc, pcm_buf, AUDIO_FRAME_SAMPLES,
                                 opus_buf, AUDIO_MAX_PKT);
-        if (bytes > 0) audio_send_frame(opus_buf, bytes);
+        if (bytes > 0)
+        {
+            audio_send_frame(opus_buf, bytes);
+            if (++frame_count % 100 == 0)
+                fprintf(stderr, "MeshAudio: %d frames captured (opus_len=%d)\n", frame_count, bytes);
+        }
     }
+    fprintf(stderr, "MeshAudio: capture loop exited after %d frames\n", frame_count);
 
 done:
     if (s && fn_free) fn_free(s);
