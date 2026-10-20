@@ -9,3 +9,8 @@ int opus_encoder_ctl(OpusEncoder*e,int r,...){ (void)e;(void)r; return 0; }
 int opus_encode(OpusEncoder*e,const int16_t*pcm,int frames,unsigned char*out,int32_t max){
     (void)e;(void)pcm;(void)max; if(frames!=960) return -1; g_encodeCalls++; out[0]=1; return 40; }
 void opus_encoder_destroy(OpusEncoder*e){ (void)e; }
+
+int kvm_slave_write_from_thread(int fd, const char *buffer, size_t len) {
+    (void)fd; (void)buffer; (void)len;
+    return 0;
+}
