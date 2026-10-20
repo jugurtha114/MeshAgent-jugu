@@ -352,34 +352,13 @@ static void mic_send_frame(const unsigned char *opus, int opusLen)
 	free(buf);
 }
 
-/* Report whether a capture endpoint actually exists, rather than assuming one
- * does: a desktop with no microphone should hide the control instead of
- * offering a button that can never work. */
-static int microphone_available(void)
-{
-	IMMDeviceEnumerator *en = NULL;
-	IMMDevice *dev = NULL;
-	HRESULT hr, co;
-	int ok = 0;
-
-	co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-	hr = CoCreateInstance(&MESHMIC_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-	                      &MESHMIC_IID_IMMDeviceEnumerator, (void**)&en);
-	if (SUCCEEDED(hr) && en != NULL)
-	{
-		hr = en->lpVtbl->GetDefaultAudioEndpoint(en, eCapture, eConsole, &dev);
-		if (SUCCEEDED(hr) && dev != NULL) { ok = 1; dev->lpVtbl->Release(dev); }
-		en->lpVtbl->Release(en);
-	}
-	if (SUCCEEDED(co)) { CoUninitialize(); }
-	return ok;
-}
-
 typedef struct
 {
 	ILibTransport_DoneState(*writeHandler)(char*, int, void*);
 	void *reserved;
 } MicEnumThreadArgs;
+
+static void mic_send_caps(ILibTransport_DoneState(*writeHandler)(char*, int, void*), void *reserved);
 
 /* Enumerate active capture endpoints and send MNG_MIC_DEVICE_LIST: mirrors
  * linux_mic.c's kvm_mic_query_devices() wire format and index semantics
@@ -486,25 +465,32 @@ static DWORD WINAPI mic_query_devices_worker(LPVOID param)
 	for (i = 0; i < (UINT)sentCount; i++) { outLen += 1 + (int)strlen(g_deviceLabels[i]); }
 
 	outFrame = (unsigned char*)malloc((size_t)outLen);
-	if (outFrame == NULL) { g_enumInProgress = 0; mic_unlock(); return 0; }
-
-	outFrame[0] = (unsigned char)((MNG_MIC_DEVICE_LIST >> 8) & 0xFF);
-	outFrame[1] = (unsigned char)(MNG_MIC_DEVICE_LIST & 0xFF);
-	outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
-	outFrame[3] = (unsigned char)(outLen & 0xFF);
-	outFrame[4] = (unsigned char)sentCount;
-	ptr = 5;
-	for (i = 0; i < (UINT)sentCount; i++)
+	if (outFrame != NULL)
 	{
-		size_t len = strlen(g_deviceLabels[i]);
-		outFrame[ptr] = (unsigned char)len; ptr++;
-		memcpy(outFrame + ptr, g_deviceLabels[i], len);
-		ptr += (int)len;
+		outFrame[0] = (unsigned char)((MNG_MIC_DEVICE_LIST >> 8) & 0xFF);
+		outFrame[1] = (unsigned char)(MNG_MIC_DEVICE_LIST & 0xFF);
+		outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
+		outFrame[3] = (unsigned char)(outLen & 0xFF);
+		outFrame[4] = (unsigned char)sentCount;
+		ptr = 5;
+		for (i = 0; i < (UINT)sentCount; i++)
+		{
+			size_t len = strlen(g_deviceLabels[i]);
+			outFrame[ptr] = (unsigned char)len; ptr++;
+			memcpy(outFrame + ptr, g_deviceLabels[i], len);
+			ptr += (int)len;
+		}
 	}
 	mic_unlock();
 
-	if (writeHandler != NULL) { writeHandler((char*)outFrame, outLen, reserved); }
-	free(outFrame);
+	if (outFrame != NULL)
+	{
+		if (writeHandler != NULL) { writeHandler((char*)outFrame, outLen, reserved); }
+		free(outFrame);
+	}
+
+	/* Refresh availability only after publishing the matching enumeration. */
+	mic_send_caps(writeHandler, reserved);
 
 	mic_lock();
 	g_enumInProgress = 0;
@@ -568,10 +554,9 @@ static void mic_send_caps(ILibTransport_DoneState(*writeHandler)(char*, int, voi
 
 	mic_lock();
 	granted = g_consent;
-	available = (g_enc != NULL);
+	available = (g_enc != NULL && g_deviceCount > 0);
 	bitrateKbps = g_bitrateKbps;
 	mic_unlock();
-	if (available) { available = microphone_available(); }
 
 	caps[0] = (unsigned char)((MNG_MIC_CAPS >> 8) & 0xFF);
 	caps[1] = (unsigned char)(MNG_MIC_CAPS & 0xFF);
@@ -1035,6 +1020,7 @@ void kvm_mic_start(const unsigned char *frame, int size)
 	HANDLE thread;
 	HANDLE restartThread = NULL;
 	int deviceChanged;
+	int available;
 	int skipConsentPrompt = 0;
 
 	/* Read before mic_apply_params() ever runs: this must still be seen on
@@ -1051,16 +1037,13 @@ void kvm_mic_start(const unsigned char *frame, int size)
 		return;
 	}
 	/* Fail closed: never open the microphone without a local decision, and
-	 * never ask for one on a machine that has no microphone at all -- caps
-	 * already hides the button for exactly that case (see
-	 * microphone_available() above), so a prompt here would be asking about
-	 * a device the operator was never even offered. */
+	 * only ask for consent when the latest active-endpoint enumeration found
+	 * a device. The cached count keeps COM enumeration off this dispatch path. */
 	if (!g_consent)
 	{
+		available = (g_deviceCount > 0);
 		mic_unlock();
-		/* microphone_available() does COM work, so it is called outside the
-		 * lock; re-take it only to record that a prompt is now outstanding. */
-		if (microphone_available())
+		if (available)
 		{
 			mic_lock();
 			g_promptOutstanding = 1;

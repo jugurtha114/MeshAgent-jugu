@@ -278,10 +278,8 @@ static void send_caps(ILibTransport_DoneState(*writeHandler)(char*, int, void*),
     int available, granted, passthrough, w, h, fps, quality, devCount;
 
     pthread_mutex_lock(&g_lock);
-    /* A camera "exists" if the last enumeration found one, or if we have never
-     * enumerated and at least one node is openable. The cheap proxy below
-     * avoids opening devices from the caps path, which the browser polls. */
-    available = (g_deviceCount > 0) || (access("/dev/video0", F_OK) == 0);
+    /* Availability reflects the most recent completed usable-device scan. */
+    available = (g_deviceCount > 0);
     granted = g_consent;
     passthrough = g_passthroughActive;
     w = g_width; h = g_height; fps = g_fps; quality = g_quality;
@@ -1222,35 +1220,43 @@ static void *cam_query_devices_worker(void *arg)
     for (i = 0; i < count; i++) { outLen += 1 + (int)strlen(g_deviceLabels[i]); }
 
     outFrame = (unsigned char*)malloc((size_t)outLen);
-    if (outFrame == NULL) { g_enumInProgress = 0; pthread_mutex_unlock(&g_lock); return NULL; }
-
-    outFrame[0] = (unsigned char)((MNG_CAM_DEVICE_LIST >> 8) & 0xFF);
-    outFrame[1] = (unsigned char)(MNG_CAM_DEVICE_LIST & 0xFF);
-    outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
-    outFrame[3] = (unsigned char)(outLen & 0xFF);
-    outFrame[4] = (unsigned char)count;
-    ptr = 5;
-    for (i = 0; i < count; i++)
+    if (outFrame != NULL)
     {
-        size_t len = strlen(g_deviceLabels[i]);
-        outFrame[ptr] = (unsigned char)len; ptr++;
-        memcpy(outFrame + ptr, g_deviceLabels[i], len);
-        ptr += (int)len;
+        outFrame[0] = (unsigned char)((MNG_CAM_DEVICE_LIST >> 8) & 0xFF);
+        outFrame[1] = (unsigned char)(MNG_CAM_DEVICE_LIST & 0xFF);
+        outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
+        outFrame[3] = (unsigned char)(outLen & 0xFF);
+        outFrame[4] = (unsigned char)count;
+        ptr = 5;
+        for (i = 0; i < count; i++)
+        {
+            size_t len = strlen(g_deviceLabels[i]);
+            outFrame[ptr] = (unsigned char)len; ptr++;
+            memcpy(outFrame + ptr, g_deviceLabels[i], len);
+            ptr += (int)len;
+        }
     }
     pthread_mutex_unlock(&g_lock);
 
-    /* Serialized like every other frame -- see cam_write_out(). */
-    if ((g_slave_pipe_fd < 0) && (writeHandler != NULL) && (writeHandler != g_writeHandler))
+    if (outFrame != NULL)
     {
-        pthread_mutex_lock(&g_sendLock);
-        writeHandler((char*)outFrame, outLen, reserved);
-        pthread_mutex_unlock(&g_sendLock);
+        /* Serialized like every other frame -- see cam_write_out(). */
+        if ((g_slave_pipe_fd < 0) && (writeHandler != NULL) && (writeHandler != g_writeHandler))
+        {
+            pthread_mutex_lock(&g_sendLock);
+            writeHandler((char*)outFrame, outLen, reserved);
+            pthread_mutex_unlock(&g_sendLock);
+        }
+        else
+        {
+            cam_write_out((char*)outFrame, outLen);
+        }
+        free(outFrame);
     }
-    else
-    {
-        cam_write_out((char*)outFrame, outLen);
-    }
-    free(outFrame);
+
+    /* The browser can receive its first CAPS before this asynchronous scan
+     * completes. Refresh it only after publishing the matching device list. */
+    send_caps(writeHandler, reserved);
 
     pthread_mutex_lock(&g_lock);
     g_enumInProgress = 0;
