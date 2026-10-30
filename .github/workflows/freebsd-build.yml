@@ -8,9 +8,11 @@ jobs:
     name: FreeBSD x86_64 (ARCHID=30)
     # GitHub has no FreeBSD runners, so the build runs inside a FreeBSD VM on a Linux runner.
     # Binaries built on an older FreeBSD release run on all newer ones, but not vice versa,
-    # so build on the oldest release CI can still support: 13.5 covers 13.x (TrueNAS CORE,
-    # older OPNsense/pfSense) through 15.x. FreeBSD 13 is EOL — if its pkg repo or VM image
-    # disappears and the "prepare" step starts failing, bump the release to 14.4.
+    # so build on the oldest release CI can still support: 14.4 covers 14.x through 15.x.
+    # FreeBSD 13 reached EOL and its pkg repository was withdrawn (the "prepare" step's
+    # `pkg install` failed with "Not Found" on FreeBSD:13:amd64), so 13.x is no longer a build
+    # or support target. pkg repositories are per major version (FreeBSD:14:*), so a 14.x image
+    # keeps working until the whole 14 branch is retired; when that happens bump to 15.x.
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository code
@@ -18,7 +20,7 @@ jobs:
       - name: Build meshagent (x86_64) in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
-          release: "13.5"
+          release: "14.4"
           # The makefile generates ILibDuktape_Commit.h only when git works — without git the
           # build fails on a missing header. safe.directory is needed because the rsynced
           # repo is owned by the runner uid, not the VM user, so git refuses it otherwise.
