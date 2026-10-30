@@ -156,6 +156,11 @@ static int g_promptOutstanding = 0;
 static char g_deviceLabels[MIC_DEVICE_MAX_COUNT][MIC_DEVICE_NAME_MAX + 1];
 static char g_deviceIds[MIC_DEVICE_MAX_COUNT][MIC_DEVICE_ID_MAX + 1];
 static int g_deviceCount = 0;
+/* 1 once an enumeration has successfully completed since kvm_mic_init(). Until
+ * then g_deviceCount says nothing (0 means "not enumerated", not "no
+ * microphone"), so neither the CAPS availability bit nor the no-consent START
+ * gate may treat it as "none". Lock-protected like g_deviceCount. */
+static int g_enumDone = 0;
 static int g_currentDeviceIndex = -1;   /* -1 = system default; else index into g_deviceIds */
 static char g_currentDeviceId[MIC_DEVICE_ID_MAX + 1] = {0}; /* resolved from g_currentDeviceIndex; capture thread reads this once at start */
 static int g_enumInProgress = 0;                    /* guards against two concurrent kvm_mic_query_devices() calls; lock-protected like g_deviceCount */
@@ -381,12 +386,26 @@ static DWORD WINAPI mic_query_devices_worker(LPVOID param)
 	HRESULT hr, co;
 	UINT count = 0, i;
 	int sentCount = 0;
+	int enumOk = 0;
 	unsigned char *outFrame;
 	int outLen, ptr;
 
 	writeHandler = targs->writeHandler;
 	reserved = targs->reserved;
 	free(targs);
+
+	/* Allocate the worst-case list frame BEFORE touching any shared state. If
+	 * it cannot be had, publish nothing: the cached enumeration and the list
+	 * the browser already holds then stay consistent with each other, instead
+	 * of CAPS advertising an enumeration whose list was never sent. */
+	outFrame = (unsigned char*)malloc((size_t)(5 + MIC_DEVICE_MAX_COUNT * (1 + MIC_DEVICE_NAME_MAX)));
+	if (outFrame == NULL)
+	{
+		mic_lock();
+		g_enumInProgress = 0;
+		mic_unlock();
+		return 0;
+	}
 
 	co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
 	hr = CoCreateInstance(&MESHMIC_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
@@ -397,7 +416,7 @@ static DWORD WINAPI mic_query_devices_worker(LPVOID param)
 		if (SUCCEEDED(hr) && pCollection != NULL)
 		{
 			hr = pCollection->lpVtbl->GetCount(pCollection, &count);
-			if (FAILED(hr)) { count = 0; }
+			if (FAILED(hr)) { count = 0; } else { enumOk = 1; }
 
 			for (i = 0; i < count && sentCount < MIC_DEVICE_MAX_COUNT; i++)
 			{
@@ -460,36 +479,38 @@ static DWORD WINAPI mic_query_devices_worker(LPVOID param)
 	 * guaranteed ready here. */
 	mic_lock();
 	g_deviceCount = sentCount;
+	/* Only a SUCCESSFUL enumeration turns the count into an answer. If COM or
+	 * the endpoint query failed, "0 devices" means "unknown", so leave
+	 * g_enumDone clear and keep reporting the microphone as available. */
+	if (enumOk) { g_enumDone = 1; }
 
 	outLen = 5; /* header(4) + count(1) */
 	for (i = 0; i < (UINT)sentCount; i++) { outLen += 1 + (int)strlen(g_deviceLabels[i]); }
 
-	outFrame = (unsigned char*)malloc((size_t)outLen);
-	if (outFrame != NULL)
+	outFrame[0] = (unsigned char)((MNG_MIC_DEVICE_LIST >> 8) & 0xFF);
+	outFrame[1] = (unsigned char)(MNG_MIC_DEVICE_LIST & 0xFF);
+	outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
+	outFrame[3] = (unsigned char)(outLen & 0xFF);
+	outFrame[4] = (unsigned char)sentCount;
+	ptr = 5;
+	for (i = 0; i < (UINT)sentCount; i++)
 	{
-		outFrame[0] = (unsigned char)((MNG_MIC_DEVICE_LIST >> 8) & 0xFF);
-		outFrame[1] = (unsigned char)(MNG_MIC_DEVICE_LIST & 0xFF);
-		outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
-		outFrame[3] = (unsigned char)(outLen & 0xFF);
-		outFrame[4] = (unsigned char)sentCount;
-		ptr = 5;
-		for (i = 0; i < (UINT)sentCount; i++)
-		{
-			size_t len = strlen(g_deviceLabels[i]);
-			outFrame[ptr] = (unsigned char)len; ptr++;
-			memcpy(outFrame + ptr, g_deviceLabels[i], len);
-			ptr += (int)len;
-		}
+		size_t len = strlen(g_deviceLabels[i]);
+		outFrame[ptr] = (unsigned char)len; ptr++;
+		memcpy(outFrame + ptr, g_deviceLabels[i], len);
+		ptr += (int)len;
 	}
 	mic_unlock();
 
-	if (outFrame != NULL)
-	{
-		if (writeHandler != NULL) { writeHandler((char*)outFrame, outLen, reserved); }
-		free(outFrame);
-	}
+	if (writeHandler != NULL) { writeHandler((char*)outFrame, outLen, reserved); }
+	free(outFrame);
 
-	/* Refresh availability only after publishing the matching enumeration. */
+	/* The browser's first CAPS may have been answered before this
+	 * asynchronous enumeration completed (see mic_send_caps()). The list goes
+	 * first, so the browser learns the device choices before it is told a
+	 * microphone is available. CAPS carries only availability, and the
+	 * browser rebuilds its choices from the list, so a CAPS sent by another
+	 * path in the instant before the list lands is harmless. */
 	mic_send_caps(writeHandler, reserved);
 
 	mic_lock();
@@ -554,7 +575,13 @@ static void mic_send_caps(ILibTransport_DoneState(*writeHandler)(char*, int, voi
 
 	mic_lock();
 	granted = g_consent;
-	available = (g_enc != NULL && g_deviceCount > 0);
+	/* Exact once an enumeration has completed. Before that the count is
+	 * unknown rather than zero, and the browser's first query is answered
+	 * while the asynchronous enumeration is still running; reporting "none"
+	 * then is a false negative that refuses the operator's first press, so
+	 * report available (consent is still required to capture). The
+	 * enumeration sends corrected CAPS when it completes. */
+	available = (g_enc != NULL && (!g_enumDone || g_deviceCount > 0));
 	bitrateKbps = g_bitrateKbps;
 	mic_unlock();
 
@@ -891,13 +918,22 @@ void kvm_mic_init(ILibTransport_DoneState(*writeHandler)(char*, int, void*), voi
 	 * previous session -- the list itself is re-queried fresh per session
 	 * anyway (see p22QueryDevices() in default.handlebars). */
 	g_deviceCount = 0;
+	g_enumDone = 0;
 	g_currentDeviceIndex = -1;
 	g_currentDeviceId[0] = '\0';
 	haveEncoder = (g_enc != NULL);
 	mic_unlock();
 
 	/* Advertise capability so the browser can show the audio button. */
-	if (haveEncoder) { mic_send_caps(writeHandler, reserved); }
+	if (haveEncoder)
+	{
+		mic_send_caps(writeHandler, reserved);
+		/* Learn which capture endpoints are really active in the background,
+		 * so the CAPS the browser asks for next is exact. Asynchronous (own
+		 * thread, never the caller's) and metadata-only: no IAudioClient is
+		 * activated and nothing is captured. */
+		kvm_mic_query_devices(writeHandler, reserved);
+	}
 }
 
 /* Apply an optional MNG_MIC_START settings payload. frame/size are the whole
@@ -1037,11 +1073,14 @@ void kvm_mic_start(const unsigned char *frame, int size)
 		return;
 	}
 	/* Fail closed: never open the microphone without a local decision, and
-	 * only ask for consent when the latest active-endpoint enumeration found
-	 * a device. The cached count keeps COM enumeration off this dispatch path. */
+	 * do not ask for one when a completed enumeration found no microphone at
+	 * all. If no enumeration has completed yet the answer is unknown, so ask:
+	 * dropping the request here would silently swallow the operator's press
+	 * (nothing would prompt and nothing would start). The cached state keeps
+	 * COM enumeration off this dispatch path. */
 	if (!g_consent)
 	{
-		available = (g_deviceCount > 0);
+		available = (!g_enumDone || g_deviceCount > 0);
 		mic_unlock();
 		if (available)
 		{
@@ -1186,10 +1225,24 @@ void kvm_mic_cleanup(void)
 
 void kvm_mic_resend_caps(ILibTransport_DoneState(*writeHandler)(char*, int, void*), void *reserved)
 {
-	/* Deliberately does not create an encoder or mutate shared state: this can
-	 * be called from the agent's control path in response to MNG_AUDIO_QUERY
-	 * before (or without) a capture session existing. */
+	int rescan;
+
+	/* Deliberately does not create an encoder or touch the capture state: this
+	 * can be called from the agent's control path in response to
+	 * MNG_AUDIO_QUERY before (or without) a capture session existing. */
 	mic_send_caps(writeHandler, reserved);
+
+	/* The browser asks once when it connects, which is the cheap moment to
+	 * notice a microphone that was plugged in since, or an enumeration that
+	 * never ran. Re-enumerate only while no microphone is known; once one has
+	 * been found this stays a plain cache read. The enumeration is
+	 * asynchronous and coalesced, so this never blocks the dispatch thread,
+	 * and it sends corrected CAPS if the answer changes. */
+	mic_lock_init();
+	mic_lock();
+	rescan = (g_enc != NULL && (!g_enumDone || g_deviceCount == 0));
+	mic_unlock();
+	if (rescan) { kvm_mic_query_devices(writeHandler, reserved); }
 }
 
 #endif /* _LINKVM && _KVM_AUDIO */

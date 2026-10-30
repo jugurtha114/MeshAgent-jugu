@@ -96,6 +96,10 @@ limitations under the License.
 static char g_deviceLabels[CAM_DEVICE_MAX_COUNT][CAM_DEVICE_NAME_MAX + 1];
 static char g_devicePaths[CAM_DEVICE_MAX_COUNT][CAM_DEVICE_PATH_MAX + 1];
 static int g_deviceCount = 0;
+/* 1 once a scan has completed since kvm_cam_init(). Until then g_deviceCount
+ * says nothing (0 means "not scanned", not "no camera"), which send_caps()
+ * must not report as "unavailable". Lock-protected like g_deviceCount. */
+static int g_enumDone = 0;
 static int g_currentDeviceIndex = -1;                     /* -1 = system default */
 static char g_currentPath[CAM_DEVICE_PATH_MAX + 1] = {0}; /* resolved from the index; read once at thread start */
 
@@ -272,19 +276,45 @@ static void cam_send(int cmd, const unsigned char *hdr, int hdrLen, const unsign
     free(buf);
 }
 
+/*
+ * Cheap guess used only until the first device scan has completed: is any
+ * /dev/videoN node accessible to this process? It opens nothing (no ioctl, so
+ * no side effect on the camera) and, unlike probing /dev/video0 alone, does
+ * not miss a camera that sits at a higher index. It can still be wrong in
+ * both directions (a metadata-only node, a node that fails QUERYCAP), which
+ * is why the scan replaces it as soon as it completes.
+ */
+static int cam_nodes_accessible(void)
+{
+    char path[CAM_DEVICE_PATH_MAX + 1];
+    int i;
+
+    for (i = 0; i < CAM_DEVICE_SCAN_MAX; i++)
+    {
+        snprintf(path, sizeof(path), "/dev/video%d", i);
+        if (access(path, R_OK | W_OK) == 0) { return 1; }
+    }
+    return 0;
+}
+
 static void send_caps(ILibTransport_DoneState(*writeHandler)(char*, int, void*), void *reserved)
 {
     unsigned char caps[CAM_CAPS_LEN];
-    int available, granted, passthrough, w, h, fps, quality, devCount;
+    int available, scanned, granted, passthrough, w, h, fps, quality, devCount;
 
     pthread_mutex_lock(&g_lock);
-    /* Availability reflects the most recent completed usable-device scan. */
-    available = (g_deviceCount > 0);
+    scanned = g_enumDone;
     granted = g_consent;
     passthrough = g_passthroughActive;
     w = g_width; h = g_height; fps = g_fps; quality = g_quality;
     devCount = g_deviceCount;
     pthread_mutex_unlock(&g_lock);
+
+    /* Exact once a scan has completed. Before that the browser's first query
+     * is answered while the asynchronous scan is still running, and the
+     * cached count cannot be trusted, so use the cheap guess; the scan sends
+     * corrected CAPS when it finishes. */
+    available = scanned ? (devCount > 0) : cam_nodes_accessible();
 
     caps[0] = (unsigned char)((MNG_CAM_CAPS >> 8) & 0xFF);
     caps[1] = (unsigned char)(MNG_CAM_CAPS & 0xFF);
@@ -1208,54 +1238,66 @@ static void *cam_query_devices_worker(void *arg)
         count++;
     }
 
+    /* Build the list frame from this scan's own results BEFORE publishing
+     * anything. If it cannot be allocated, publish nothing at all: the cached
+     * state and the list the browser already holds stay consistent with each
+     * other, instead of CAPS advertising a scan whose list was never sent. */
+    outLen = 5;
+    for (i = 0; i < count; i++) { outLen += 1 + (int)strlen(labels[i]); }
+
+    outFrame = (unsigned char*)malloc((size_t)outLen);
+    if (outFrame == NULL)
+    {
+        pthread_mutex_lock(&g_lock);
+        g_enumInProgress = 0;
+        pthread_mutex_unlock(&g_lock);
+        return NULL;
+    }
+
+    outFrame[0] = (unsigned char)((MNG_CAM_DEVICE_LIST >> 8) & 0xFF);
+    outFrame[1] = (unsigned char)(MNG_CAM_DEVICE_LIST & 0xFF);
+    outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
+    outFrame[3] = (unsigned char)(outLen & 0xFF);
+    outFrame[4] = (unsigned char)count;
+    ptr = 5;
+    for (i = 0; i < count; i++)
+    {
+        size_t len = strlen(labels[i]);
+        outFrame[ptr] = (unsigned char)len; ptr++;
+        memcpy(outFrame + ptr, labels[i], len);
+        ptr += (int)len;
+    }
+
     pthread_mutex_lock(&g_lock);
     g_deviceCount = count;
+    g_enumDone = 1;
     for (i = 0; i < count; i++)
     {
         memcpy(g_deviceLabels[i], labels[i], sizeof(labels[i]));
         memcpy(g_devicePaths[i], paths[i], sizeof(paths[i]));
     }
-
-    outLen = 5;
-    for (i = 0; i < count; i++) { outLen += 1 + (int)strlen(g_deviceLabels[i]); }
-
-    outFrame = (unsigned char*)malloc((size_t)outLen);
-    if (outFrame != NULL)
-    {
-        outFrame[0] = (unsigned char)((MNG_CAM_DEVICE_LIST >> 8) & 0xFF);
-        outFrame[1] = (unsigned char)(MNG_CAM_DEVICE_LIST & 0xFF);
-        outFrame[2] = (unsigned char)((outLen >> 8) & 0xFF);
-        outFrame[3] = (unsigned char)(outLen & 0xFF);
-        outFrame[4] = (unsigned char)count;
-        ptr = 5;
-        for (i = 0; i < count; i++)
-        {
-            size_t len = strlen(g_deviceLabels[i]);
-            outFrame[ptr] = (unsigned char)len; ptr++;
-            memcpy(outFrame + ptr, g_deviceLabels[i], len);
-            ptr += (int)len;
-        }
-    }
     pthread_mutex_unlock(&g_lock);
 
-    if (outFrame != NULL)
+    /* Serialized like every other frame -- see cam_write_out(). */
+    if ((g_slave_pipe_fd < 0) && (writeHandler != NULL) && (writeHandler != g_writeHandler))
     {
-        /* Serialized like every other frame -- see cam_write_out(). */
-        if ((g_slave_pipe_fd < 0) && (writeHandler != NULL) && (writeHandler != g_writeHandler))
-        {
-            pthread_mutex_lock(&g_sendLock);
-            writeHandler((char*)outFrame, outLen, reserved);
-            pthread_mutex_unlock(&g_sendLock);
-        }
-        else
-        {
-            cam_write_out((char*)outFrame, outLen);
-        }
-        free(outFrame);
+        pthread_mutex_lock(&g_sendLock);
+        writeHandler((char*)outFrame, outLen, reserved);
+        pthread_mutex_unlock(&g_sendLock);
     }
+    else
+    {
+        cam_write_out((char*)outFrame, outLen);
+    }
+    free(outFrame);
 
-    /* The browser can receive its first CAPS before this asynchronous scan
-     * completes. Refresh it only after publishing the matching device list. */
+    /* The browser's first CAPS may have been answered before this
+     * asynchronous scan completed (see send_caps()). The list always goes
+     * first, so the browser learns the device choices before it is told
+     * cameras are available. CAPS carries only availability and the count and
+     * the browser rebuilds its choices from the list, so a CAPS sent by
+     * another path in the instant between the publish above and the list
+     * reaching the browser is harmless. */
     send_caps(writeHandler, reserved);
 
     pthread_mutex_lock(&g_lock);
@@ -1384,6 +1426,7 @@ void kvm_cam_init(ILibTransport_DoneState(*writeHandler)(char*, int, void*), voi
     g_consent = 0;
     g_promptOutstanding = 0;
     g_deviceCount = 0;
+    g_enumDone = 0;
     g_currentDeviceIndex = -1;
     g_currentPath[0] = '\0';
     g_width = CAM_DEFAULT_WIDTH;
@@ -1407,6 +1450,11 @@ void kvm_cam_init(ILibTransport_DoneState(*writeHandler)(char*, int, void*), voi
     pthread_mutex_unlock(&g_lock);
 
     send_caps(writeHandler, reserved);
+
+    /* Learn which cameras are really usable in the background, so the CAPS
+     * the browser asks for next is exact rather than a guess. Asynchronous
+     * and metadata-only (open + QUERYCAP + ENUM_FMT); never streams. */
+    kvm_cam_query_devices(writeHandler, reserved);
 }
 
 void kvm_cam_set_consent(int granted)
@@ -1834,7 +1882,20 @@ void kvm_cam_feed(char *buffer, int bufferLen)
 
 void kvm_cam_resend_caps(ILibTransport_DoneState(*writeHandler)(char*, int, void*), void *reserved)
 {
+    int rescan;
+
     send_caps(writeHandler, reserved);
+
+    /* The browser asks once when it connects, which is the cheap moment to
+     * notice a camera that was plugged in since, or a scan that never ran.
+     * Rescan only while nothing usable is known; once a camera has been found
+     * this stays a plain cache read. The scan is asynchronous and coalesced,
+     * so this never blocks the KVM dispatch thread, and it sends corrected
+     * CAPS if the answer changes. */
+    pthread_mutex_lock(&g_lock);
+    rescan = (!g_enumDone || g_deviceCount == 0);
+    pthread_mutex_unlock(&g_lock);
+    if (rescan) { kvm_cam_query_devices(writeHandler, reserved); }
 }
 
 void kvm_cam_cleanup(void)
@@ -1857,6 +1918,7 @@ void kvm_cam_cleanup(void)
     pthread_mutex_lock(&g_lock);
     reset_scene_state();
     g_deviceCount = 0;
+    g_enumDone = 0;
     g_passthroughActive = 0;
     g_initialised = 0;
     g_writeHandler = NULL;
