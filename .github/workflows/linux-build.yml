@@ -11,18 +11,23 @@ permissions:
 jobs:
   linux-build-x86:
     runs-on: ubuntu-24.04
+    env:
+      # Highest glibc the x86 agents may require. The ubuntu-24.04 runner is glibc 2.39, and
+      # building on it bakes GLIBC_2.38 symbols (__isoc23_strtol, fmod@2.38, ...) into every
+      # binary, which then refuses to start on RHEL 9 / Rocky 9 / Alma 9 (glibc 2.34),
+      # Ubuntu 22.04 and Debian 12. Building in debian:bookworm (glibc 2.36) tops out at
+      # 2.34, the same floor as the aarch64 agent below.
+      GLIBC_MAX: '2.34'
     steps:
       - name: Check out repository code
         uses: actions/checkout@v7.0.0
-      - name: Install Packages
-        run: |
-          sudo dpkg --add-architecture i386 &&
-          sudo apt clean all && sudo apt update && 
-          sudo apt-get install -y libx11-dev libxtst-dev libxext-dev libjpeg62-dev build-essential musl-tools &&
-          sudo apt-get install -y linux-libc-dev:i386 libc6-dev-i386 libjpeg62-dev:i386 &&
-          sudo apt-get install -y libc6-armel-cross libc6-dev-armel-cross binutils-arm-linux-gnueabi libncurses5-dev gcc-arm-linux-gnueabihf &&
-          sudo apt-get install -y libxrandr-dev libwayland-dev libdrm-dev libegl-dev libgles-dev &&
-          sudo apt-get install -y libpulse-dev
+      # Everything builds inside one older-glibc container, so the runner image can be bumped
+      # without changing which distros the agents run on. 32-bit needs gcc-multilib (the
+      # runner image has it preinstalled, a container does not) plus the :i386 dev packages
+      # for jconfig.h and the kernel headers. Debian names the JPEG headers libjpeg62-turbo-dev.
+      # They are JPEG_LIB_VERSION 62, so the makefile keeps the default (non-v80) libturbojpeg.a.
+      # musl-tools is for the Alpine (musl, static) target, which does not depend on glibc.
+      #
       # AUDIO=1 enables the Opus/PulseAudio KVM audio path. Only the
       # KVM-enabled targets get it, and only those with a committed
       # lib-opus/linux/$(ARCHNAME)/libopus.a: x86 (5), x86-64 (6), arm64 (26).
@@ -32,16 +37,24 @@ jobs:
       # It needs no extra package or library: V4L2 is kernel ioctls via
       # linux/videodev2.h (from libc6-dev, already present), and the JPEG work
       # it does uses the libjpeg-turbo the KVM build already links.
-      - name: Build 32 Bit Linux
-        run: make -j4 linux ARCHID=5 AUDIO=1 CAMERA=1 && make clean
-      - name: Build 64 Bit Linux
-        run: make -j4 linux ARCHID=6 AUDIO=1 CAMERA=1 && make clean
-      - name: Build 32 Bit NOKVM Linux
-        run: make -j4 linux ARCHID=19 && make clean
-      - name: Build 64 Bit NOKVM Linux
-        run: make -j4 linux ARCHID=20 && make clean
-      - name: Build 64 Bit Alpine Linux
-        run: make -j4 linux ARCHID=33 && make clean
+      - name: Build x86 / x86-64 / Alpine in an older-glibc container
+        run: |
+          docker run --rm -v "${{ github.workspace }}":/src -w /src debian:bookworm bash -c '
+            set -e
+            dpkg --add-architecture i386
+            apt-get update
+            apt-get install -y git build-essential gcc-multilib pkg-config musl-tools libc6-dev-i386 linux-libc-dev:i386 libjpeg62-turbo-dev libjpeg62-turbo-dev:i386 libx11-dev libxtst-dev libxext-dev libxrandr-dev libwayland-dev libdrm-dev libegl-dev libgles-dev libpulse-dev
+            git config --global --add safe.directory /src
+            make -j4 linux ARCHID=5 AUDIO=1 CAMERA=1 && make clean
+            make -j4 linux ARCHID=6 AUDIO=1 CAMERA=1 && make clean
+            make -j4 linux ARCHID=19 && make clean
+            make -j4 linux ARCHID=20 && make clean
+            make -j4 linux ARCHID=33 && make clean
+          '
+      # Fail the build, instead of shipping, if a future change pulls a newer glibc back in.
+      # The Alpine binary is static musl and has no glibc requirement to check.
+      - name: Verify the glibc floor
+        run: sh .github/scripts/check-glibc-floor.sh "$GLIBC_MAX" meshagent_x86 meshagent_x86-64 meshagent_x86_nokvm meshagent_x86-64_nokvm
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
